@@ -12,25 +12,38 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
 
-
-
-
 public static class HolidayRisk
 {
     [FunctionName("HolidayRisk")]
     public static async Task<IActionResult> Run(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = null)] HttpRequest req,
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = null)] HttpRequest req,
         ILogger log)
     {
-        string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
-        var data = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(requestBody);
+        // Try to get inputs from the URL query parameters
+        string origin = req.Query["origin"];
+        string destination = req.Query["destination"];
+        string dateStr = req.Query["date"];
 
-        string origin = data.GetValueOrDefault("origin");
-        string destination = data.GetValueOrDefault("destination");
-        string dateStr = data.GetValueOrDefault("date");
+        // If any are missing, try to read them from the request body (for POST)
+        if (string.IsNullOrEmpty(origin) || string.IsNullOrEmpty(destination) || string.IsNullOrEmpty(dateStr))
+        {
+            string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+            var data = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(requestBody);
+
+            origin = origin ?? data?.GetValueOrDefault("origin");
+            destination = destination ?? data?.GetValueOrDefault("destination");
+            dateStr = dateStr ?? data?.GetValueOrDefault("date");
+        }
+
+        if (string.IsNullOrEmpty(origin) || string.IsNullOrEmpty(destination) || string.IsNullOrEmpty(dateStr))
+        {
+            return new BadRequestObjectResult("Missing origin, destination, or date.");
+        }
 
         if (!DateTime.TryParse(dateStr, out var date))
-            return new BadRequestObjectResult("Invalid date format");
+        {
+            return new BadRequestObjectResult("Invalid date format. Please use YYYY-MM-DD.");
+        }
 
         var client = new HttpClient();
         var year = date.Year;
@@ -43,16 +56,24 @@ public static class HolidayRisk
             return holidays.Select(j => DateTime.Parse(j["date"]!.ToString())).ToList();
         }
 
-        var originHolidays = await GetHolidays(origin);
-        var destHolidays = await GetHolidays(destination);
+        try
+        {
+            var originHolidays = await GetHolidays(origin);
+            var destHolidays = await GetHolidays(destination);
 
-        int risk = 30;
-        if (originHolidays.Contains(date) || destHolidays.Contains(date))
-            risk = 100;
-        else if (originHolidays.Any(d => Math.Abs((d - date).Days) <= 1) ||
-                 destHolidays.Any(d => Math.Abs((d - date).Days) <= 1))
-            risk = 70;
+            int risk = 30;
+            if (originHolidays.Contains(date) || destHolidays.Contains(date))
+                risk = 100;
+            else if (originHolidays.Any(d => Math.Abs((d - date).Days) <= 1) ||
+                     destHolidays.Any(d => Math.Abs((d - date).Days) <= 1))
+                risk = 70;
 
-        return new OkObjectResult(new { riskScore = risk });
+            return new OkObjectResult(new { riskScore = risk });
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "Failed to fetch holidays or calculate risk.");
+            return new StatusCodeResult(500);
+        }
     }
 }
